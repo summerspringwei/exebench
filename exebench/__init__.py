@@ -11,13 +11,13 @@ import glob
 import re
 from ast import literal_eval
 
-__all__ = ['diff_io', 'Wrapper', 'exebench_dict_to_dict']
+__all__ = ['diff_io', 'Wrapper', 'exebench_dict_to_dict', 'LLVMAssembler', 'cpp2ass', 'll2ass']
 
 __version__ = 0.1
 
 # UTILS (in a self-contained file to ease deployment)
 
-_DEFAULT_CMD_TIMEOUT = 5
+_DEFAULT_CMD_TIMEOUT = 15
 _ROOT_PATH_FOR_JSON_HPP = os.path.dirname(__file__)
 _SYNTH_LIBS_PATH = os.path.dirname(__file__)
 
@@ -76,9 +76,10 @@ class _DefaultAssembler(_Assembler):
                 with _get_tmp_path(content=cpp_wrapper, suffix='.cpp') as cpp_path, \
                         _get_tmp_path(content=func_assembly, suffix='.s') as s_path:
 
-                    cmd = f'g++ -fpermissive -O0 -o {executable_path} {cpp_path} {s_path} -I {_ROOT_PATH_FOR_JSON_HPP} -I{_SYNTH_LIBS_PATH}'
+                    cmd = f'clang++ -fpermissive -O0 -o {executable_path} {cpp_path} {s_path} -I {_ROOT_PATH_FOR_JSON_HPP} -I{_SYNTH_LIBS_PATH}'
 
                     stdout, stderr = _run_command(cmd)
+                    print(stderr)
 
         return Path(executable_path)
 
@@ -88,13 +89,75 @@ def _compile_exe_path(c_deps, func_c_signature, func_assembly, cpp_wrapper, asse
 
 # API
 
+def cpp2ass(cpp_code: str, opt_level = "-O2") -> Tuple[str, str, str]:
+    """Converts C++ code to assembly code and llvm using clang and llc.
+    
+    """
+    success = True
+    with _get_tmp_path(content=cpp_code, suffix='.c') as cpp_path:
+        with _get_tmp_path(content=None, suffix='.s') as s_path:
+            cmd = f"clang {opt_level} -emit-llvm -o {str(cpp_path)}.ll -c {cpp_path}"
+            stdout, stderr = _run_command(cmd)
+            if stderr.find("error") != -1:
+                print(stderr)
+                print(cpp_code)
+                success = False
+            cmd = f"llc -o {s_path} {str(cpp_path)}.ll"
+            stdout, stderr = _run_command(cmd)
+            if stderr.find("error") != -1:
+                success = False
+            with open(s_path, 'r') as f:
+                s_code = f.read()
+            ll_code = None
+            with open(str(cpp_path), 'r') as f:
+                ll_code = f.read()
+            return success, ll_code, s_code
+
+
+def ll2ass(ll_code: str) -> str:
+    with _get_tmp_path(content=ll_code, suffix='.ll') as ll_path:
+        with _get_tmp_path(content=None, suffix='.s') as s_path:
+            cmd = f"llc -o {s_path} {ll_path}"
+            stdout, stderr = _run_command(cmd)
+            if stderr.find("error") != -1:
+                print(stderr)
+            with open(s_path, 'r') as f:
+                s_code = f.read()
+            return s_code
+
+
+class LLVMAssembler(_Assembler):
+    def __call__(self, c_deps, func_c_signature, func_assembly, cpp_wrapper) -> Path:
+        with _get_tmp_path(content=None, suffix='.x', delete=False) as executable_path:
+            c_deps += f'\nextern {func_c_signature};\n'
+            with _get_tmp_path(content=c_deps, suffix='.c') as c_deps_path:
+                cpp_wrapper = re.sub(
+                    r'extern\s\"C\"\s\{\s.*\s\}', 'extern "C" \n{\n#include "' + c_deps_path + '"\n}\n',
+                    cpp_wrapper) # replace tmp path
+                with _get_tmp_path(content=cpp_wrapper, suffix='.cpp') as cpp_path, \
+                        _get_tmp_path(content=func_assembly, suffix='.s') as s_path:
+
+                    cmd = f'clang++ -fpermissive -O0 -o {executable_path} {cpp_path} {s_path} -I {_ROOT_PATH_FOR_JSON_HPP} -I{_SYNTH_LIBS_PATH}'
+                    
+                    stdout, stderr = _run_command(cmd)
+                    print(stderr)
+
+        return Path(executable_path)
+
 
 class Wrapper:
-    def __init__(self, c_deps, func_c_signature, func_assembly, cpp_wrapper, assembler_backend=_DefaultAssembler()):
-        self._compiled_exe_path = self._compile_exe_path(c_deps, func_c_signature, func_assembly, cpp_wrapper, assembler_backend)
+    def __init__(self, c_deps, func_c_signature, func_assembly, cpp_wrapper, 
+                assembler_backend=_DefaultAssembler(), func_def: str=None, ll_code: str=None):
+        self._compiled_exe_path = self._compile_exe_path(c_deps, func_c_signature, func_assembly, cpp_wrapper, assembler_backend, func_def, ll_code)
 
     @staticmethod
-    def _compile_exe_path(c_deps, func_c_signature, func_assembly, cpp_wrapper, assembler_backend):
+    def _compile_exe_path(c_deps, func_c_signature, func_assembly, cpp_wrapper, assembler_backend, func_def: str = None, ll_code: str = None):
+        if func_def is not None:
+            func_assembly = cpp2ass(func_def)
+            print(func_assembly)
+        if ll_code is not None:
+            func_assembly = ll2ass(ll_code)
+            print(func_assembly)
         return _compile_exe_path(c_deps, func_c_signature, func_assembly, cpp_wrapper, assembler_backend)
 
     def __call__(self, inp, return_stdout_and_stderr=False):
