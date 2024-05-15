@@ -10,6 +10,14 @@ import shutil
 import glob
 import re
 from ast import literal_eval
+import logging
+import re
+
+# Set up logging
+logging.basicConfig(
+    format='%(asctime)s - %(levelname)s - %(filename)s - Line: %(lineno)d - %(message)s',
+    level=logging.DEBUG
+)
 
 __all__ = ['diff_io', 'Wrapper', 'exebench_dict_to_dict', 'LLVMAssembler', 'cpp2ass', 'll2ass']
 
@@ -26,7 +34,7 @@ def _run_command(command: str, stdin: Optional[str] = None, timeout: Optional[in
     output = subprocess.run(command.split(), capture_output=True, text=True, input=stdin, timeout=timeout)
     stdout = output.stdout.decode('utf-8') if isinstance(output.stdout, bytes) else output.stdout
     stderr = output.stderr.decode('utf-8') if isinstance(output.stderr, bytes) else output.stderr
-    return stdout, stderr
+    return output.returncode, stdout, stderr
 
 
 def _get_host_process_id():
@@ -43,7 +51,7 @@ def _cleanup(path_pattern):
 
 
 @contextlib.contextmanager
-def _get_tmp_path(content: Optional[str] = None, suffix: Optional[str] = None, delete=True) -> str:
+def _get_tmp_path(content: Optional[str] = None, suffix: Optional[str] = None, delete=False) -> str:
     prefix = _get_host_process_id()
     try:
         with tempfile.NamedTemporaryFile(prefix=prefix, suffix=suffix, delete=delete, mode='w+') as ntf:
@@ -76,10 +84,10 @@ class _DefaultAssembler(_Assembler):
                 with _get_tmp_path(content=cpp_wrapper, suffix='.cpp') as cpp_path, \
                         _get_tmp_path(content=func_assembly, suffix='.s') as s_path:
 
-                    cmd = f'clang++ -fpermissive -O0 -o {executable_path} {cpp_path} {s_path} -I {_ROOT_PATH_FOR_JSON_HPP} -I{_SYNTH_LIBS_PATH}'
+                    cmd = f'g++ -fpermissive -O0 -o {executable_path} {cpp_path} {s_path} -I {_ROOT_PATH_FOR_JSON_HPP} -I{_SYNTH_LIBS_PATH}'
 
-                    stdout, stderr = _run_command(cmd)
-                    print(stderr)
+                    _, stdout, stderr = _run_command(cmd)
+                    
 
         return Path(executable_path)
 
@@ -89,36 +97,47 @@ def _compile_exe_path(c_deps, func_c_signature, func_assembly, cpp_wrapper, asse
 
 # API
 
-def cpp2ass(cpp_code: str, opt_level = "-O2") -> Tuple[str, str, str]:
+def contrain_error(content: str) -> bool:
+    pattern = re.compile(r'error|Error:|ERROR|Error')
+    return bool(pattern.search(content))
+
+def cpp2ass(cpp_code: str, opt_level = "-O2") -> Tuple[bool, str, str]:
     """Converts C++ code to assembly code and llvm using clang and llc.
     
     """
     success = True
-    with _get_tmp_path(content=cpp_code, suffix='.c') as cpp_path:
-        with _get_tmp_path(content=None, suffix='.s') as s_path:
-            cmd = f"clang {opt_level} -emit-llvm -o {str(cpp_path)}.ll -c {cpp_path}"
-            stdout, stderr = _run_command(cmd)
-            if stderr.find("error") != -1:
-                print(stderr)
-                print(cpp_code)
-                success = False
-            cmd = f"llc -o {s_path} {str(cpp_path)}.ll"
-            stdout, stderr = _run_command(cmd)
-            if stderr.find("error") != -1:
-                success = False
-            with open(s_path, 'r') as f:
-                s_code = f.read()
-            ll_code = None
-            with open(str(cpp_path), 'r') as f:
-                ll_code = f.read()
-            return success, ll_code, s_code
+    try:
+        with _get_tmp_path(content=cpp_code, suffix='.c') as cpp_path:
+            with _get_tmp_path(content=None, suffix='.s') as s_path:
+                cmd = f"clang {opt_level} -emit-llvm -o {str(cpp_path)}.ll -c {cpp_path}"
+                returncode, stdout, stderr = _run_command(cmd)
+                if returncode != 0 or contrain_error(stderr):
+                    success = False
+                    logging.error(f"Executing {cmd} got {stderr}")
+                cmd = f"llc -o {s_path} {str(cpp_path)}.ll"
+                returncode, stdout, stderr = _run_command(cmd)
+                if returncode != 0 or contrain_error(stderr):
+                    success = False
+                    logging.error(f"Executing {cmd} got {stderr}")
+                with open(s_path, 'r') as f:
+                    s_code = f.read()
+                ll_code = None
+                # TODO(Extract LLVM IR from here)
+                # with open(str(cpp_path), 'r') as f:
+                #     ll_code = f.read()
+                return success, ll_code, s_code
+    except Exception as e:
+        success, ll_code, s_code = False, None, None
+        logging.error(f"Error: {e}")
+    finally:
+        return success, ll_code, s_code
 
 
 def ll2ass(ll_code: str) -> str:
     with _get_tmp_path(content=ll_code, suffix='.ll') as ll_path:
         with _get_tmp_path(content=None, suffix='.s') as s_path:
             cmd = f"llc -o {s_path} {ll_path}"
-            stdout, stderr = _run_command(cmd)
+            returncode, stdout, stderr = _run_command(cmd)
             if stderr.find("error") != -1:
                 print(stderr)
             with open(s_path, 'r') as f:
@@ -139,9 +158,11 @@ class LLVMAssembler(_Assembler):
 
                     cmd = f'clang++ -fpermissive -O0 -o {executable_path} {cpp_path} {s_path} -I {_ROOT_PATH_FOR_JSON_HPP} -I{_SYNTH_LIBS_PATH}'
                     
-                    stdout, stderr = _run_command(cmd)
-                    print(stderr)
-
+                    returncode, stdout, stderr = _run_command(cmd)
+                    if returncode != 0 or contrain_error(stderr):
+                        logging.error(f"Executing {cmd} failed with {stderr}")
+                        return None
+        
         return Path(executable_path)
 
 
@@ -152,24 +173,26 @@ class Wrapper:
 
     @staticmethod
     def _compile_exe_path(c_deps, func_c_signature, func_assembly, cpp_wrapper, assembler_backend, func_def: str = None, ll_code: str = None):
+        success = True
         if func_def is not None:
-            func_assembly = cpp2ass(func_def)
-            print(func_assembly)
+            success, _, func_assembly = cpp2ass(func_def)
         if ll_code is not None:
             func_assembly = ll2ass(ll_code)
-            print(func_assembly)
+        if (func_def is not None or ll_code is not None) and not success:
+            return None
         return _compile_exe_path(c_deps, func_c_signature, func_assembly, cpp_wrapper, assembler_backend)
 
     def __call__(self, inp, return_stdout_and_stderr=False):
         executable = self._compiled_exe_path
-
+        if executable is None:
+            return None
         with _get_tmp_path(content=None, suffix='.json') as input_tmp_json_path:
             output_file = ''.join(input_tmp_json_path.split(".")[:1]) + '-out.json'
 
             with open(input_tmp_json_path, 'w') as f:
                 json.dump(inp, f)
 
-            stdout, stderr = _run_command(f'{executable} {input_tmp_json_path} {output_file}')
+            returncode, stdout, stderr = _run_command(f'{executable} {input_tmp_json_path} {output_file}')
 
             with open(output_file, 'r') as f:
                 output = json.load(f)
