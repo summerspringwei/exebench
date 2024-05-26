@@ -337,6 +337,7 @@ def eval_assembly(row: Dict, assembly: str) -> bool:
                 logging.error('Error: The code could not be compiled')
                 success = False
                 return success
+            print(observed_output, exebench_dict_to_dict(o))
             count += 1 if diff_io(
                 observed_output=observed_output,
                 expected_output=exebench_dict_to_dict(o)) else 0

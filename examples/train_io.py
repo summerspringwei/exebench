@@ -114,7 +114,7 @@ def test_default_compile_and_run_exebench_sample(path_to_dataset: str,
                 c_deps=c_deps + '\n',
                 func_c_signature=row['func_head_types'].replace('extern', ''),
                 func_assembly=row["asm"]['code'][0],
-                cpp_wrapper=row['real_exe_wrapper'],
+                cpp_wrapper=row['real_exe_wrapper'] if row['real_exe_wrapper'] is not None else row['synth_exe_wrapper'],
                 # assembler_backend=LLVMAssembler(),
                 # func_def=row["func_def"]
             )
@@ -166,9 +166,57 @@ def get_all_assembly(path_to_dataset,
                            split=split_name)  # , use_auth_token=True)
     # for row in dataset.select((0, 100)):
     #     print(row)
-    dataset_with_assembly = dataset.map(compile_row_with_assembly, num_proc=40)
+    dataset = dataset.select(range(0, 2))
+    filtered_dataset = dataset.filter(lambda x: can_compile_and_run(x), num_proc=1)
+    print(f"After filter {len(filtered_dataset)} can compile and run")
+    dataset_with_assembly = filtered_dataset.map(compile_row_with_assembly, num_proc=40)
     # dataset_with_assembly = dataset.select((0, 100)).map(compile_assembly, batched=True, batch_size=20)
     dataset_with_assembly.save_to_disk(path_to_saved_dataset)
+
+
+def can_compile_and_run(row: Dict) -> bool:
+    """Test whether the record can run or not. If it can, return True, otherwise False.
+    
+    
+    """
+    success = False
+    c_deps = preprocessing_c_deps(row)
+    cpp_wrapper = row['real_exe_wrapper'] if row['real_exe_wrapper'] is not None else row['synth_exe_wrapper']
+    io_pairs = row['real_io_pairs'] if row['real_io_pairs'] is not None else row['synth_io_pairs']
+    synth_wrapper = Wrapper(
+        c_deps=c_deps + '\n',
+        func_c_signature=row['func_head_types'].replace('extern', ''),
+        func_assembly=row["asm"]['code'][0],
+        cpp_wrapper=cpp_wrapper,
+        # assembler_backend=LLVMAssembler()
+    )
+    try:
+        observed_output = synth_wrapper(
+                exebench_dict_to_dict(io_pairs['input']
+                                      [0]))  # Run synthetic example number 0
+        if observed_output is None:
+            logging.error('Error: The code could not be compiled')
+        else:
+            success = True if diff_io(
+                    observed_output=observed_output,
+                    expected_output=exebench_dict_to_dict(
+                        io_pairs['output'][0])) else False
+    except Exception as e:
+        logging.error(f"Error for {row['path']}")
+        logging.error(e)
+    return success
+
+
+def filter_dataset_to_can_compile_and_run(path_to_dataset, path_to_filterd_dataset):
+    dataset = load_dataset(
+        path_to_dataset,
+        split='train_real_simple_io')  # , use_auth_token=True)
+    # dataset = dataset.select(range(0, 200))
+    
+    filtered_dataset = dataset.filter(lambda x: can_compile_and_run(x), num_proc=40)
+    filtered_dataset.save_to_disk(path_to_filterd_dataset)
+    print(f"Split Total {len(dataset)}, can compile {len(filtered_dataset)}")
+
 
 
 def convert_to_instruction_format(path_to_dataset, path_to_json):
@@ -214,12 +262,15 @@ if __name__ == '__main__':
     # dump_sample_for_splits("/data/xiachunwei/Datasets/exebench")
     # test_compile_and_run_exebench_sample("/data/xiachunwei/Datasets/exebench",
     #                          num_samples=100)
-    # path_to_exebench_dataset = "/data/xiachunwei/Datasets/exebench"
-    # path_to_saved_dataset = "/data/xiachunwei/Datasets/exebench/train_real_simple_io-llvm-assembly-batch-clang-15"
-    # get_all_assembly(path_to_exebench_dataset, path_to_saved_dataset)
+    path_to_exebench_dataset = "/data/xiachunwei/Datasets/exebench"
+    split = "train_synth_rich_io"
+    path_to_saved_dataset = f"/data/xiachunwei/Datasets/filtered_exebench/{split}-llvm-assembly-batch-clang-15"
+    path_to_filtered_dataset = f"/data/xiachunwei/Datasets/filtered_exebench/{split}-llvm-assembly-batch-clang-15-filtered"
+    get_all_assembly(path_to_exebench_dataset, path_to_saved_dataset, split_name=split)
     # convert_to_instruction_format(path_to_saved_dataset,
     #                      f"{path_to_saved_dataset}.json")
     # test_default_compile_and_run_exebench_sample(path_to_exebench_dataset,
     #                          num_samples=100)
     # print_io_pairs()
-    test_eval_assembly()
+    # test_eval_assembly()
+    # filter_dataset_to_can_compile_and_run(path_to_exebench_dataset, path_to_filtered_dataset)
