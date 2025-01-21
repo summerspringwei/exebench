@@ -132,24 +132,34 @@ def contrain_error(content: str) -> bool:
     return bool(pattern.search(content))
 
 
-def cpp2ass(cpp_code: str, opt_level="-O2") -> Tuple[bool, str, str]:
+
+
+def cpp2ass(cpp_code: str, func_name, opt_level="-O3") -> Tuple[bool, str, str]:
     """Converts C++ code to assembly code and llvm using clang and llc.
     
     """
     success, ll_code, s_code = True, None, None
+    if func_name is None:
+        return success, ll_code, s_code
     try:
         with _get_tmp_path(content=cpp_code, suffix='.c') as cpp_path:
             with _get_tmp_path(content=None, suffix='.s') as s_path:
                 cmd = f"clang {opt_level} -emit-llvm -S -o {str(cpp_path)}.ll -c {cpp_path}"
                 returncode, stdout, stderr = _run_command(cmd)
-                if returncode != 0 or contrain_error(stderr):
-                    success = False
-                    logging.error(f"Executing {cmd} got {stderr}")
+                if returncode != 0:
+                    logging.error(f"Executing {cmd} returncode: {returncode}\n stdout: {stdout}\n stderr:\n {stderr}")
+                    return False, None, None
+                # extract only the function
+                cmd = f"llvm-extract -func {func_name} {str(cpp_path)}.ll -S -o {str(cpp_path)}.ll"
+                returncode, stdout, stderr = _run_command(cmd)
+                if returncode != 0:
+                    logging.error(f"Executing {cmd} returncode: {returncode}\n stdout: {stdout}\n stderr:\n {stderr}")
+                    return False, None, None
                 cmd = f"llc -o {s_path} {str(cpp_path)}.ll"
                 returncode, stdout, stderr = _run_command(cmd)
-                if returncode != 0 or contrain_error(stderr):
-                    success = False
-                    logging.error(f"Executing {cmd} got {stderr}")
+                if returncode != 0:
+                    logging.error(f"Executing {cmd} returncode: {returncode}\n stdout: {stdout}\n stderr:\n {stderr}")
+                    return False, None, None
                 with open(s_path, 'r') as f:
                     s_code = f.read()
                 with open(f"{str(cpp_path)}.ll", 'r') as f:
@@ -157,9 +167,9 @@ def cpp2ass(cpp_code: str, opt_level="-O2") -> Tuple[bool, str, str]:
                 return success, ll_code, s_code
     except Exception as e:
         success, ll_code, s_code = False, None, None
-        logging.error(f"Error: {e}")
     finally:
         return success, ll_code, s_code
+
 
 
 def ll2ass(ll_code: str) -> str:
@@ -167,11 +177,13 @@ def ll2ass(ll_code: str) -> str:
         with _get_tmp_path(content=None, suffix='.s') as s_path:
             cmd = f"llc -o {s_path} {ll_path}"
             returncode, stdout, stderr = _run_command(cmd)
-            if stderr.find("error") != -1:
-                print(stderr)
-            with open(s_path, 'r') as f:
-                s_code = f.read()
-            return s_code
+            if returncode != 0:
+                logging.error(f"Executing {cmd} failed with {stderr}")
+                return None
+            else:
+                with open(s_path, 'r') as f:
+                    s_code = f.read()
+                return s_code
 
 
 class LLVMAssembler(_Assembler):
@@ -321,7 +333,9 @@ def eval_assembly(row: Dict, assembly: str) -> bool:
     success = True
     synth_wrapper = None
     try:
-        c_deps = preprocessing_c_deps(row)
+        c_deps=(row['synth_deps'] + '\n' +
+                    row['synth_io_pairs']['dummy_funcs'][0] + '\n').replace(
+                        'typedef int bool;', '')
         synth_wrapper = Wrapper(
             c_deps=c_deps + '\n',
             func_c_signature=row['func_head_types'].replace('extern', ''),

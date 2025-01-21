@@ -164,19 +164,14 @@ def get_all_assembly(path_to_dataset,
                      split_name: str = "train_real_simple_io"):
     dataset = load_dataset(path_to_dataset,
                            split=split_name)  # , use_auth_token=True)
-    # for row in dataset.select((0, 100)):
-    #     print(row)
-    dataset = dataset.select(range(0, 2))
     filtered_dataset = dataset.filter(lambda x: can_compile_and_run(x), num_proc=1)
     print(f"After filter {len(filtered_dataset)} can compile and run")
     dataset_with_assembly = filtered_dataset.map(compile_row_with_assembly, num_proc=40)
-    # dataset_with_assembly = dataset.select((0, 100)).map(compile_assembly, batched=True, batch_size=20)
     dataset_with_assembly.save_to_disk(path_to_saved_dataset)
 
 
 def can_compile_and_run(row: Dict) -> bool:
     """Test whether the record can run or not. If it can, return True, otherwise False.
-    
     
     """
     success = False
@@ -267,6 +262,8 @@ if __name__ == '__main__':
     path_to_saved_dataset = f"/data/xiachunwei/Datasets/filtered_exebench/{split}-llvm-assembly-batch-clang-15"
     path_to_filtered_dataset = f"/data/xiachunwei/Datasets/filtered_exebench/{split}-llvm-assembly-batch-clang-15-filtered"
     get_all_assembly(path_to_exebench_dataset, path_to_saved_dataset, split_name=split)
+
+
     # convert_to_instruction_format(path_to_saved_dataset,
     #                      f"{path_to_saved_dataset}.json")
     # test_default_compile_and_run_exebench_sample(path_to_exebench_dataset,
